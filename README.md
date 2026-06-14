@@ -1,2 +1,2 @@
 # Inventory-IQ
-Sorting and storage APP
+My First Streamlit Application
