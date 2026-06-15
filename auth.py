@@ -3,15 +3,15 @@ from database import get_all_users, authenticate_user
 from typing import Tuple
 
 COOKIE_NAME = 'inventory_iqlight'
-KEY = 'inventory_secret_key'
+KEY = 'inventory_secret_key_long_secure_32_bytes'
 EXP_DAYS = 30
 
 def build_credentials_from_db():
     users = get_all_users()
     credentials = {"usernames": {}}
     for u in users:
-        # use email as username key
-        username = u['email'].replace('@', '_')
+        # Use raw email directly as the username key in the Authenticate credentials dict
+        username = u['email']
         credentials['usernames'][username] = {
             'name': u.get('business_name') or u['email'],
             'email': u['email'],
@@ -25,8 +25,7 @@ def get_authenticator():
         credentials=creds,
         cookie_name=COOKIE_NAME,
         cookie_key=KEY,
-        cookie_expiry_days=float(EXP_DAYS),
-        auto_hash=False
+        cookie_expiry_days=float(EXP_DAYS)
     )
 
 def authenticate_by_db(email: str, password_hashed: str):

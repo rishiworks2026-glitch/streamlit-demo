@@ -149,7 +149,7 @@ def signup_flow():
                     user = authenticate_user(email, hashed)
                     if user:
                         st.session_state['user'] = user
-                        st.session_state['username'] = email.replace('@', '_')
+                        st.session_state['username'] = email
                         st.session_state['name'] = business
                         st.session_state['authentication_status'] = True
                         st.success("Account created successfully! Redirecting...")
@@ -168,7 +168,7 @@ def main():
     # Handle cookie re-authentication
     if st.session_state.get('authentication_status') is True and 'user' not in st.session_state:
         username = st.session_state.get('username')
-        email = username.replace('_', '@') if username else None
+        email = username if username else None
         if email:
             from database import get_all_users
             for u in get_all_users():
