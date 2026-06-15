@@ -11,7 +11,7 @@ from database import (
     add_user, 
     authenticate_user, 
     add_product, 
-    list_products, 
+    list_products_with_sale_info, 
     record_sale, 
     delete_product,
     update_product,
@@ -107,23 +107,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Helper function to compute days since last sale
-def get_product_days_since_sale(p, today):
-    pid = p['product_id']
-    last = latest_sale_date(pid)
-    if last:
-        try:
-            last_date = datetime.date.fromisoformat(last)
-            return (today - last_date).days
-        except Exception:
-            pass
-    pd = p.get('purchase_date')
-    try:
-        last_date = datetime.date.fromisoformat(pd) if pd else datetime.date.fromisoformat(p['created_at'])
-        return (today - last_date).days
-    except Exception:
-        return 999
-
 def signup_flow():
     st.markdown("""
     <div style="background-color: #f8fafc; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; margin-bottom: 20px;">
@@ -143,7 +126,7 @@ def signup_flow():
             else:
                 try:
                     hashed = hash_password_bcrypt(pwd)
-                    uid = add_user(business, email, hashed)
+                    uid = add_user(business, email, hashed, role='user')
                     
                     # Fetch created user for session and auto-login
                     user = authenticate_user(email, hashed)
@@ -165,16 +148,21 @@ def main():
     # Load authenticator
     authenticator = get_authenticator()
     
-    # Handle cookie re-authentication
-    if st.session_state.get('authentication_status') is True and 'user' not in st.session_state:
+    # Handle session state synchronization and cookie re-authentication
+    if st.session_state.get('authentication_status') is True:
         username = st.session_state.get('username')
-        email = username if username else None
-        if email:
-            from database import get_all_users
-            for u in get_all_users():
-                if u['email'] == email:
-                    st.session_state['user'] = u
-                    break
+        current_user = st.session_state.get('user')
+        if not current_user or current_user.get('email') != username:
+            if username:
+                from database import get_all_users
+                for u in get_all_users():
+                    if u['email'] == username:
+                        st.session_state['user'] = u
+                        break
+    else:
+        # Clear custom user object if logged out/unauthenticated
+        if 'user' in st.session_state:
+            del st.session_state['user']
 
     # If user is not authenticated
     if st.session_state.get('authentication_status') is not True:
@@ -196,7 +184,6 @@ def main():
                 
                 # Check status after submission
                 if st.session_state.get('authentication_status') is True:
-                    # Rerun to load user details
                     st.rerun()
                 elif st.session_state.get('authentication_status') is False:
                     st.error("Invalid email or password.")
@@ -215,16 +202,33 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
-    # Fetch data for calculations
-    products = list_products(user['id'])
+    # Fetch data in a single optimized query (N+1 query resolution)
+    products = list_products_with_sale_info(user['id'])
     today = datetime.date.today()
     for p in products:
-        p['days_since_sale'] = get_product_days_since_sale(p, today)
+        last = p.get('latest_sale_date')
+        if last:
+            try:
+                last_date = datetime.date.fromisoformat(last)
+                days = (today - last_date).days
+            except Exception:
+                days = 999
+        else:
+            pd = p.get('purchase_date')
+            try:
+                last_date = datetime.date.fromisoformat(pd) if pd else datetime.date.fromisoformat(p['created_at'])
+                days = (today - last_date).days
+            except Exception:
+                days = 999
+        p['days_since_sale'] = days
         
     sales = list_sales(user['id'])
     
-    # Navigation
-    page = st.sidebar.selectbox("Navigation", [
+    # Configure navigation selectbox conditional on roles (RBAC)
+    nav_options = []
+    if user.get('role') == 'admin':
+        nav_options.append("🔑 Admin Console")
+    nav_options.extend([
         "📊 Dashboard", 
         "📦 Manage Inventory", 
         "💸 Record Sales", 
@@ -233,11 +237,14 @@ def main():
         "📥 Export Reports"
     ])
     
+    page = st.sidebar.selectbox("Navigation", nav_options)
+    
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"""
     <div style="font-size: 0.85rem; color: #475569;">
         Logged in to:<br><b>{user['business_name']}</b><br>
-        Email: {user['email']}
+        Email: {user['email']}<br>
+        Role: <span style="text-transform: capitalize; font-weight:600;">{user.get('role', 'user')}</span>
     </div>
     """, unsafe_allow_html=True)
     
@@ -245,8 +252,13 @@ def main():
     st.sidebar.markdown("<br>", unsafe_allow_html=True)
     authenticator.logout(button_name="Logout", location="sidebar")
     
-    # Handle page switching
-    if page == "📊 Dashboard":
+    # Route matching
+    if page == "🔑 Admin Console":
+        if user.get('role') != 'admin':
+            st.error("Access Denied: You do not have administrator privileges.")
+        else:
+            render_admin_console()
+    elif page == "📊 Dashboard":
         render_dashboard(user, products, sales, today)
     elif page == "📦 Manage Inventory":
         render_manage_inventory(user, products)
@@ -258,6 +270,59 @@ def main():
         render_promotions(user, products)
     elif page == "📥 Export Reports":
         render_export_reports(user, products, sales)
+
+def render_admin_console():
+    st.title("🔑 Platform Admin Console")
+    st.markdown("Platform-wide usage overview and statistics across all business tenants.")
+    
+    from database import get_admin_metrics, get_admin_user_details
+    metrics = get_admin_metrics()
+    
+    m1, m2, m3, m4, m5 = st.columns(5)
+    with m1:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-left-color: #6366f1;">
+            <div class="kpi-label">Registered Users</div>
+            <div class="kpi-value" style="color: #6366f1;">{metrics['total_users']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m2:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-left-color: #8b5cf6;">
+            <div class="kpi-label">Active Businesses</div>
+            <div class="kpi-value" style="color: #8b5cf6;">{metrics['total_businesses']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m3:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-left-color: #ec4899;">
+            <div class="kpi-label">Platform Items</div>
+            <div class="kpi-value" style="color: #ec4899;">{metrics['total_products']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m4:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-left-color: #f43f5e;">
+            <div class="kpi-label">Locked Cost Capital</div>
+            <div class="kpi-value" style="color: #f43f5e;">₹{metrics['total_locked_capital']:,.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m5:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-left-color: #10b981;">
+            <div class="kpi-label">Total platform Revenue</div>
+            <div class="kpi-value" style="color: #10b981;">₹{metrics['total_revenue']:,.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    st.markdown("### Business Accounts Directory")
+    details = get_admin_user_details()
+    if details:
+        df_details = pd.DataFrame(details)
+        df_details.columns = ['ID', 'Business Name', 'Email', 'Role', 'Products Listed', 'Inventory Value (₹)', 'Total Sales (₹)']
+        st.dataframe(df_details, use_container_width=True, hide_index=True)
+    else:
+        st.info("No tenant stores have registered yet.")
 
 def render_dashboard(user, products, sales, today):
     st.title(f"Dashboard — {user['business_name']}")
@@ -330,7 +395,7 @@ def render_dashboard(user, products, sales, today):
                 markers=True
             )
             fig_sales.update_traces(line_color='#0084ff', line_width=3)
-            st.plotly_chart(fig_sales, use_container_width=True)
+            st.plotly_chart(fig_sales, width="stretch")
         else:
             st.info("No sales data available to show trends.")
             
@@ -348,7 +413,7 @@ def render_dashboard(user, products, sales, today):
                 color='category',
                 color_discrete_sequence=px.colors.qualitative.Pastel
             )
-            st.plotly_chart(fig_cat, use_container_width=True)
+            st.plotly_chart(fig_cat, width="stretch")
 
     with c2:
         # Dead Stock Distribution
@@ -379,7 +444,7 @@ def render_dashboard(user, products, sales, today):
                 title="Dead Stock Distribution"
             )
             fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width="stretch")
         else:
             st.info("No product data to show distribution.")
             
@@ -398,7 +463,7 @@ def render_dashboard(user, products, sales, today):
                 color_discrete_sequence=['#0084ff']
             )
             fig_top.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_top, use_container_width=True)
+            st.plotly_chart(fig_top, width="stretch")
             
     # Inventory Overview Table
     st.markdown("### Inventory Overview")
@@ -410,7 +475,7 @@ def render_dashboard(user, products, sales, today):
         overview_disp.columns = [
             'Product Name', 'Category', 'Quantity', 'Cost Price (₹)', 'Selling Price (₹)', 'Purchase Date', 'Days Unsold'
         ]
-        st.dataframe(overview_disp, use_container_width=True, hide_index=True)
+        st.dataframe(overview_disp, width="stretch", hide_index=True)
     else:
         st.info("Your inventory is currently empty.")
 
@@ -428,6 +493,11 @@ def render_manage_inventory(user, products):
             cost = st.number_input("Cost Price (₹)", min_value=0.0, value=0.0, format="%.2f")
             sell = st.number_input("Selling Price (₹)", min_value=0.0, value=0.0, format="%.2f")
             pdate = st.date_input("Purchase Date", value=datetime.date.today())
+            
+            # Simple margin check warning
+            if sell > 0.0 and sell < cost:
+                st.warning("⚠️ Warning: Selling price is lower than cost price (selling at a loss).")
+                
             submitted = st.form_submit_button("Add Product")
             if submitted:
                 if not name or not cat:
@@ -453,6 +523,10 @@ def render_manage_inventory(user, products):
                 new_cost = st.number_input("Cost Price (₹)", min_value=0.0, value=float(selected_prod['cost_price']), format="%.2f")
                 new_sell = st.number_input("Selling Price (₹)", min_value=0.0, value=float(selected_prod['selling_price']), format="%.2f")
                 
+                # Margin warning check
+                if new_sell > 0.0 and new_sell < new_cost:
+                    st.warning("⚠️ Warning: Selling price is lower than cost price (selling at a loss).")
+                
                 try:
                     curr_pdate = datetime.date.fromisoformat(selected_prod['purchase_date'])
                 except Exception:
@@ -466,6 +540,7 @@ def render_manage_inventory(user, products):
                     else:
                         update_product(
                             selected_prod['product_id'], 
+                            user['id'],
                             new_name, 
                             new_cat, 
                             int(new_qty), 
@@ -488,7 +563,7 @@ def render_manage_inventory(user, products):
             
             if st.button("Confirm Delete", type="primary"):
                 pid = prod_map[selected_option]
-                delete_product(pid)
+                delete_product(pid, user['id'])
                 st.success("Product deleted successfully!")
                 st.rerun()
 
@@ -527,7 +602,7 @@ def render_record_sales(user, products, sales):
             sales_df = pd.DataFrame(sales)
             sales_disp = sales_df[['sale_date', 'product_name', 'quantity_sold', 'selling_price', 'revenue', 'profit']].copy()
             sales_disp.columns = ['Sale Date', 'Product Name', 'Qty Sold', 'Selling Price (₹)', 'Total Revenue (₹)', 'Total Profit (₹)']
-            st.dataframe(sales_disp, use_container_width=True, hide_index=True)
+            st.dataframe(sales_disp, width="stretch", hide_index=True)
 
 def render_dead_stock_alerts(user, products):
     st.title("Dead Stock Alerts")
@@ -623,7 +698,7 @@ def render_promotions(user, products):
     total_locked = calc_df['Locked Cost (₹)'].sum()
     st.warning(f"⚠️ **Locked Cost Capital:** You have **₹{total_locked:,.2f}** tied up in slow-moving inventory.")
     
-    st.dataframe(calc_df, use_container_width=True, hide_index=True)
+    st.dataframe(calc_df, width="stretch", hide_index=True)
 
 def render_export_reports(user, products, sales):
     st.title("Export Reports")
@@ -638,7 +713,7 @@ def render_export_reports(user, products, sales):
             df_prod_disp = df_prod[['product_id', 'product_name', 'category', 'quantity', 'cost_price', 'selling_price', 'purchase_date', 'days_since_sale']].copy()
             df_prod_disp.columns = ['ID', 'Name', 'Category', 'Quantity', 'Cost Price (₹)', 'Selling Price (₹)', 'Purchase Date', 'Days Unsold']
             
-            st.dataframe(df_prod_disp.head(5), use_container_width=True, hide_index=True)
+            st.dataframe(df_prod_disp.head(5), width="stretch", hide_index=True)
             
             csv_data = df_prod_disp.to_csv(index=False)
             st.download_button(
@@ -657,7 +732,7 @@ def render_export_reports(user, products, sales):
             df_sales_disp = df_sales[['sale_id', 'sale_date', 'product_name', 'category', 'quantity_sold', 'selling_price', 'revenue', 'profit']].copy()
             df_sales_disp.columns = ['Sale ID', 'Date', 'Product Name', 'Category', 'Qty Sold', 'Unit Price (₹)', 'Total Revenue (₹)', 'Profit (₹)']
             
-            st.dataframe(df_sales_disp.head(5), use_container_width=True, hide_index=True)
+            st.dataframe(df_sales_disp.head(5), width="stretch", hide_index=True)
             
             csv_data = df_sales_disp.to_csv(index=False)
             st.download_button(
@@ -678,7 +753,7 @@ def render_export_reports(user, products, sales):
             df_dead_disp = df_dead[['product_name', 'category', 'quantity', 'cost_price', 'selling_price', 'days_since_sale', 'potential_revenue_loss']].copy()
             df_dead_disp.columns = ['Name', 'Category', 'Quantity', 'Cost Price (₹)', 'Selling Price (₹)', 'Days Unsold', 'Potential Revenue Loss (₹)']
             
-            st.dataframe(df_dead_disp.head(5), use_container_width=True, hide_index=True)
+            st.dataframe(df_dead_disp.head(5), width="stretch", hide_index=True)
             
             csv_data = df_dead_disp.to_csv(index=False)
             st.download_button(

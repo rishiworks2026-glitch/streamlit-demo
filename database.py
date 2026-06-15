@@ -14,45 +14,64 @@ def init_db():
     conn = get_conn()
     try:
         cur = conn.cursor()
+        # Enable foreign key support
+        cur.execute("PRAGMA foreign_keys = ON;")
+        
         cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             business_name TEXT,
             email TEXT UNIQUE,
-            password TEXT
+            password TEXT,
+            role TEXT DEFAULT 'user'
         )
         ''')
+        
         cur.execute('''
         CREATE TABLE IF NOT EXISTS products (
             product_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             product_name TEXT,
             category TEXT,
-            quantity INTEGER,
-            cost_price REAL,
-            selling_price REAL,
+            quantity INTEGER CHECK(quantity >= 0),
+            cost_price REAL CHECK(cost_price >= 0.0),
+            selling_price REAL CHECK(selling_price >= 0.0),
             purchase_date TEXT,
-            created_at TEXT
+            created_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         ''')
+        
         cur.execute('''
         CREATE TABLE IF NOT EXISTS sales (
             sale_id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER,
-            quantity_sold INTEGER,
-            sale_date TEXT
+            quantity_sold INTEGER CHECK(quantity_sold > 0),
+            sale_date TEXT,
+            FOREIGN KEY(product_id) REFERENCES products(product_id) ON DELETE CASCADE
         )
         ''')
+        
+        # Schema migration (if table existed but role column didn't)
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+        except sqlite3.OperationalError:
+            pass # column already exists
+            
+        # Create database-level performance indexes for foreign key lookups
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_products_user ON products(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_product ON sales(product_id)")
+        
         conn.commit()
     finally:
         conn.close()
 
-def add_user(business_name: str, email: str, password_hashed: str) -> int:
+def add_user(business_name: str, email: str, password_hashed: str, role: str = 'user') -> int:
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("INSERT INTO users (business_name, email, password) VALUES (?, ?, ?)",
-                    (business_name, email, password_hashed))
+        cur.execute("INSERT INTO users (business_name, email, password, role) VALUES (?, ?, ?, ?)",
+                    (business_name, email, password_hashed, role))
         conn.commit()
         return cur.lastrowid
     finally:
@@ -121,6 +140,24 @@ def list_products(user_id: int) -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
+def list_products_with_sale_info(user_id: int) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT p.product_id, p.user_id, p.product_name, p.category, p.quantity, 
+                   p.cost_price, p.selling_price, p.purchase_date, p.created_at,
+                   MAX(s.sale_date) as latest_sale_date
+            FROM products p
+            LEFT JOIN sales s ON p.product_id = s.product_id
+            WHERE p.user_id = ?
+            GROUP BY p.product_id
+        ''', (user_id,))
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
 def update_product_quantity(product_id: int, new_qty: int):
     conn = get_conn()
     try:
@@ -181,25 +218,31 @@ def get_dead_stock(user_id: int, days_threshold: int) -> List[Dict[str, Any]]:
             res.append(p)
     return res
 
-def delete_product(product_id: int):
+def delete_product(product_id: int, user_id: int):
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("DELETE FROM products WHERE product_id = ?", (product_id,))
-        cur.execute("DELETE FROM sales WHERE product_id = ?", (product_id,))
-        conn.commit()
+        # Enforce security context: make sure the product belongs to the user
+        cur.execute("SELECT 1 FROM products WHERE product_id = ? AND user_id = ?", (product_id, user_id))
+        if cur.fetchone():
+            cur.execute("DELETE FROM products WHERE product_id = ?", (product_id,))
+            cur.execute("DELETE FROM sales WHERE product_id = ?", (product_id,))
+            conn.commit()
     finally:
         conn.close()
 
-def update_product(product_id: int, product_name: str, category: str, quantity: int, cost_price: float, selling_price: float, purchase_date: str):
+def update_product(product_id: int, user_id: int, product_name: str, category: str, quantity: int, cost_price: float, selling_price: float, purchase_date: str):
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "UPDATE products SET product_name = ?, category = ?, quantity = ?, cost_price = ?, selling_price = ?, purchase_date = ? WHERE product_id = ?",
-            (product_name, category, quantity, cost_price, selling_price, purchase_date, product_id)
-        )
-        conn.commit()
+        # Enforce security context: make sure the product belongs to the user
+        cur.execute("SELECT 1 FROM products WHERE product_id = ? AND user_id = ?", (product_id, user_id))
+        if cur.fetchone():
+            cur.execute(
+                "UPDATE products SET product_name = ?, category = ?, quantity = ?, cost_price = ?, selling_price = ?, purchase_date = ? WHERE product_id = ? AND user_id = ?",
+                (product_name, category, quantity, cost_price, selling_price, purchase_date, product_id, user_id)
+            )
+            conn.commit()
     finally:
         conn.close()
 
@@ -216,6 +259,58 @@ def list_sales(user_id: int) -> List[Dict[str, Any]]:
             WHERE p.user_id = ?
             ORDER BY s.sale_date DESC
         ''', (user_id,))
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+def get_admin_metrics() -> Dict[str, Any]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM users WHERE role != 'admin'")
+        total_users = cur.fetchone()[0] or 0
+        
+        cur.execute("SELECT COUNT(DISTINCT business_name) FROM users WHERE role != 'admin'")
+        total_businesses = cur.fetchone()[0] or 0
+        
+        cur.execute("SELECT SUM(quantity) FROM products")
+        total_products = cur.fetchone()[0] or 0
+        
+        cur.execute("SELECT SUM(quantity * cost_price) FROM products")
+        total_locked_capital = cur.fetchone()[0] or 0.0
+        
+        cur.execute('''
+            SELECT SUM(s.quantity_sold * p.selling_price) 
+            FROM sales s 
+            JOIN products p ON s.product_id = p.product_id
+        ''')
+        total_revenue = cur.fetchone()[0] or 0.0
+        
+        return {
+            "total_users": total_users,
+            "total_businesses": total_businesses,
+            "total_products": total_products,
+            "total_locked_capital": total_locked_capital,
+            "total_revenue": total_revenue
+        }
+    finally:
+        conn.close()
+
+def get_admin_user_details() -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT u.id, u.business_name, u.email, u.role,
+                   (SELECT COUNT(*) FROM products p WHERE p.user_id = u.id) as product_count,
+                   (SELECT SUM(p.quantity * p.cost_price) FROM products p WHERE p.user_id = u.id) as inventory_value,
+                   (SELECT SUM(s.quantity_sold * p.selling_price) FROM sales s JOIN products p ON s.product_id = p.product_id WHERE p.user_id = u.id) as total_sales
+            FROM users u
+            WHERE u.role != 'admin'
+            ORDER BY u.id ASC
+        ''')
         rows = cur.fetchall()
         return [dict(r) for r in rows]
     finally:
