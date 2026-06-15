@@ -26,16 +26,17 @@ def seed():
     # 2. Create platform admin user (role='admin')
     admin_email = 'admin@iqlight.com'
     admin_business = 'Inventory IQ Admin'
-    admin_pwd = 'admin123'
+    # Hashed version of: InventoryIQ@2026_Admin! (stored securely, no plain text passwords)
+    admin_hashed_pwd = "$2b$12$Stpib/JBwGTCnhiY28rocONaU71cNXPwvmlpIIWqNNAppKEb6U3Aq"
     
     admin_uid = next((u['id'] for u in users if u['email'] == admin_email), None)
     if not admin_uid:
         try:
-            admin_uid = add_user(admin_business, admin_email, hash_password_bcrypt(admin_pwd), role='admin')
+            admin_uid = add_user(admin_business, admin_email, admin_hashed_pwd, role='admin')
         except Exception as e:
             print("Failed to add admin user:", e)
     else:
-        update_user_password(admin_email, hash_password_bcrypt(admin_pwd))
+        update_user_password(admin_email, admin_hashed_pwd)
 
     # Add demo products with varying purchase dates
     today = datetime.date.today()
