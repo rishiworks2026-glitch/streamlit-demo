@@ -62,6 +62,13 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_products_user ON products(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_product ON sales(product_id)")
         
+        # Check if an admin exists; if not, seed a default admin account securely
+        cur.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+        if cur.fetchone()[0] == 0:
+            default_admin_hash = "$2b$12$Stpib/JBwGTCnhiY28rocONaU71cNXPwvmlpIIWqNNAppKEb6U3Aq"
+            cur.execute("INSERT OR IGNORE INTO users (business_name, email, password, role) VALUES (?, ?, ?, ?)",
+                        ("Inventory IQ Admin", "admin@iqlight.com", default_admin_hash, "admin"))
+        
         conn.commit()
     finally:
         conn.close()
